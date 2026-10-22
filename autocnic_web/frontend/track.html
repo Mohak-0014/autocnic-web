@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoCNIC — Live tracker</title>
+<link rel="stylesheet" href="/static/app.css">
+<style>.footer{display:none}</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+</head>
+<body>
+<div id="nav"></div>
+<div data-main>
+<div class="track">
+  <div class="track-main">
+    <div class="graph-wrap">
+      <div class="legend">
+        <span><i style="background:#4f46e5;border-color:#4f46e5"></i>changed input</span>
+        <span><i style="background:#d1fae5;border-color:#059669"></i>recomputed</span>
+        <span><i style="background:#fef3c7;border-color:#d97706"></i>skipped · edge blocked</span>
+        <span><i style="background:#f1f5f9;border-color:#94a3b8;border-style:dashed"></i>retained (certified)</span>
+      </div>
+      <div id="cy"></div>
+    </div>
+    <div class="timeline">
+      <div class="timeline-head">
+        <h2>Timeline</h2>
+        <span class="muted" style="font-size:12px;">click a step to replay the graph at that point</span>
+        <div class="spacer"></div>
+        <a class="btn secondary small" id="certs-link" href="#">Certificates for this step →</a>
+      </div>
+      <div class="tl-track" id="tl"></div>
+    </div>
+  </div>
+
+  <aside class="side">
+    <section>
+      <h2>Change an input</h2>
+      <div id="chg"></div>
+      <div class="muted" style="font-size:11px;margin-top:6px;">Need several at once? Use the <a id="inputs-link" href="#">Inputs page</a>.</div>
+    </section>
+    <section>
+      <h2 id="step-title">This step</h2>
+      <div id="step-summary" class="muted">Select a step.</div>
+    </section>
+    <section id="node-section" class="hidden">
+      <h2 id="node-title">Node</h2>
+      <div id="node-detail"></div>
+    </section>
+    <section>
+      <h2>Values <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:400" id="values-sub"></span></h2>
+      <div class="kv" id="values"></div>
+    </section>
+    <section>
+      <h2>Session totals</h2>
+      <div class="mini-stats" id="stats"></div>
+    </section>
+  </aside>
+</div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+(async () => {
+  const session = await boot('track', {needSession: true});
+  if (!session) return;
+  const sid = session.session_id;
+  document.getElementById('inputs-link').href = pageLink('/inputs');
+
+  const graph = session.graph;
+  const edges = edgeLookup(graph);
+  const inputNodes = graph.nodes.filter(n => n.kind === 'input').map(n => n.id);
+  let history = [];
+  let certs = [];
+  let sel = -1;              // -1 = initial state, otherwise update_index
+  let cy = null;
+  let liveInputs = {};
+
+  Object.entries(session.inputs).forEach(([k, v]) => { liveInputs[k] = v.current_value; });
+
+  function valuesAt(idx) {
+    if (idx < 0) return session.initial_values && Object.keys(session.initial_values).length ? session.initial_values : session.state.values;
+    return history[idx].values;
+  }
+  const prevValues = idx => (idx <= 0 ? valuesAt(-1) : history[idx - 1].values);
+
+  // ---- graph ---------------------------------------------------------
+  function initGraph() {
+    cy = cytoscape({
+      container: document.getElementById('cy'),
+      elements: [
+        ...graph.nodes.map(n => ({data: {id: n.id, kind: n.kind, label: n.id, role: 'idle'}})),
+        ...graph.edges.map(e => ({data: {id: e.src + '->' + e.dst, source: e.src, target: e.dst,
+          conditional: e.conditional ? 'yes' : 'no', predicate: e.conditional ? e.predicate_desc : '', status: 'idle'}})),
+      ],
+      layout: {name: 'breadthfirst', directed: true, padding: 40, spacingFactor: 1.25},
+      style: [
+        {selector: 'node', style: {
+          label: 'data(label)', color: '#0f172a', 'font-size': 11, 'font-weight': 600, 'text-valign': 'center', 'text-halign': 'center',
+          shape: 'round-rectangle', width: 'label', height: 42, padding: '13px', 'text-wrap': 'wrap', 'text-max-width': 140,
+          'background-color': '#ffffff', 'border-width': 2, 'border-color': '#cbd5e1',
+          'shadow-blur': 10, 'shadow-color': '#0f172a', 'shadow-opacity': .08, 'shadow-offset-y': 3,
+        }},
+        {selector: 'node[kind="input"]', style: {'border-color': '#818cf8', 'background-color': '#eef2ff'}},
+        {selector: 'node[role="changed"]', style: {'background-color': '#4f46e5', 'border-color': '#4338ca', 'border-width': 3, color: '#ffffff'}},
+        {selector: 'node[role="recomputed"]', style: {'background-color': '#d1fae5', 'border-color': '#059669', 'border-width': 3}},
+        {selector: 'node[role="skipped"]', style: {'background-color': '#fef3c7', 'border-color': '#d97706', 'border-width': 3}},
+        {selector: 'node[role="retained"]', style: {'background-color': '#f1f5f9', 'border-color': '#94a3b8', 'border-style': 'dashed'}},
+        {selector: 'node:selected', style: {'overlay-color': '#4f46e5', 'overlay-opacity': .12, 'overlay-padding': 6}},
+        {selector: 'edge', style: {
+          width: 2, 'curve-style': 'bezier', 'target-arrow-shape': 'triangle', 'line-color': '#cbd5e1', 'target-arrow-color': '#cbd5e1',
+          label: 'data(predicate)', 'font-size': 9, color: '#64748b', 'text-background-color': '#fbfcfe', 'text-background-opacity': .95,
+          'text-background-padding': 2, 'text-rotation': 'autorotate',
+        }},
+        {selector: 'edge[conditional="yes"]', style: {'line-style': 'dashed'}},
+        {selector: 'edge[status="active"]', style: {'line-color': '#10b981', 'target-arrow-color': '#10b981', width: 3.5}},
+        {selector: 'edge[status="frontier_active"]', style: {'line-color': '#f59e0b', 'target-arrow-color': '#f59e0b', width: 3.5}},
+        {selector: 'edge[status="frontier_blocked"]', style: {'line-color': '#f59e0b', 'target-arrow-color': '#f59e0b', width: 3, 'line-style': 'dotted'}},
+      ],
+    });
+    cy.on('tap', 'node', ev => showNode(ev.target.id()));
+    cy.on('tap', ev => { if (ev.target === cy) document.getElementById('node-section').classList.add('hidden'); });
+  }
+
+  function paintGraph() {
+    const vals = valuesAt(sel);
+    const prev = prevValues(sel);
+    const h = sel >= 0 ? history[sel] : null;
+    const statusByEdge = {};
+    if (h) h.edge_status.forEach(s => { statusByEdge[s.src + '->' + s.dst] = s.status; });
+    const recomputed = new Set(h ? h.recomputed : []);
+    const certTargets = new Set(certs.filter(c => c.update_index === sel).map(c => c.target));
+    const frontierDst = new Set(h ? h.frontier.map(f => f.dst) : []);
+
+    cy.nodes().forEach(n => {
+      const id = n.id();
+      let role = 'idle';
+      if (h) {
+        if (id === h.input_node) role = 'changed';
+        else if (recomputed.has(id)) role = 'recomputed';
+        else if (frontierDst.has(id)) role = 'skipped';
+        else if (certTargets.has(id)) role = 'retained';
+      }
+      const v = vals[id];
+      const changed = h && prev[id] !== undefined && JSON.stringify(prev[id]) !== JSON.stringify(v);
+      n.data('role', role);
+      n.data('label', id + '\n' + fmt(v) + (changed ? '  (was ' + fmt(prev[id]) + ')' : ''));
+    });
+    cy.edges().forEach(e => e.data('status', statusByEdge[e.id()] || 'idle'));
+  }
+
+  // ---- side panels -----------------------------------------------------
+  function renderSide() {
+    const vals = valuesAt(sel), prev = prevValues(sel);
+    const h = sel >= 0 ? history[sel] : null;
+
+    document.getElementById('step-title').textContent = h ? `Step #${h.update_index}` : 'Initial state';
+    const sum = document.getElementById('step-summary');
+    if (!h) {
+      sum.innerHTML = `Baseline computed from the project's initial inputs. Change an input to start the timeline.`;
+    } else {
+      const skipped = certs.filter(c => c.update_index === sel);
+      sum.innerHTML = `<div style="margin-bottom:6px"><span class="mono" style="font-weight:600">${esc(h.input_node)}</span>
+          <span class="muted">${esc(fmt(h.old_value))} →</span> <span class="mono">${esc(fmt(h.new_value))}</span></div>
+        <div>Recomputed <b style="color:var(--good)">${h.recomputed.length}</b> of ${h.baseline_invocations} nodes
+          ${h.recomputed.length ? '(' + esc(h.recomputed.join(', ')) + ')' : ''}</div>
+        <div>Certified-skipped <b style="color:var(--accent)">${skipped.length}</b> ·
+          <span class="muted">model calls ${h.model_invocations}/${h.baseline_invocations}</span></div>
+        <div class="muted" style="font-size:11px;margin-top:4px">${esc(fmtTime(h.at))}</div>`;
+    }
+    document.getElementById('certs-link').href = pageLink('/certificates', h ? {u: sel} : {});
+    document.getElementById('values-sub').textContent = h ? '· after this step' : '';
+    const recomputed = new Set(h ? h.recomputed : []);
+    document.getElementById('values').innerHTML = Object.keys(vals).map(k => {
+      const changed = h && prev[k] !== undefined && JSON.stringify(prev[k]) !== JSON.stringify(vals[k]);
+      const cls = recomputed.has(k) ? 'recomputed' : (h && !changed && !inputNodes.includes(k) ? 'retained' : '');
+      return `<div class="k">${esc(k)}</div><div class="v ${cls}">${changed ? esc(fmt(prev[k])) + ' → ' : ''}${esc(fmt(vals[k]))}</div>`;
+    }).join('');
+
+    const c = session.cumulative;
+    renderStats();
+  }
+
+  function renderStats() {
+    const base = history.reduce((a, h) => a + h.baseline_invocations, 0);
+    const cnic = history.reduce((a, h) => a + h.model_invocations, 0);
+    const red = base ? (100 * (1 - cnic / base)).toFixed(1) : '0.0';
+    const ok = certs.filter(c => c.verified_ok).length;
+    document.getElementById('stats').innerHTML = `
+      <div class="stat good"><div class="v">${red}%</div><div class="l">fewer model calls</div></div>
+      <div class="stat"><div class="v">${history.length}</div><div class="l">updates</div></div>
+      <div class="stat"><div class="v">${cnic}<span class="muted" style="font-size:13px"> / ${base}</span></div><div class="l">calls vs baseline</div></div>
+      <div class="stat"><div class="v">${ok}<span class="muted" style="font-size:13px"> / ${certs.length}</span></div><div class="l">certs verified</div></div>`;
+  }
+
+  function showNode(id) {
+    const sec = document.getElementById('node-section');
+    sec.classList.remove('hidden');
+    document.getElementById('node-title').textContent = 'Node · ' + id;
+    const vals = valuesAt(sel), prev = prevValues(sel);
+    const incoming = graph.edges.filter(e => e.dst === id);
+    const nodeCerts = certs.filter(c => c.target === id && c.update_index === sel);
+    let html = `<div class="kv"><div class="k">value</div><div class="v">${esc(fmt(vals[id]))}</div>`;
+    if (sel >= 0 && prev[id] !== undefined && JSON.stringify(prev[id]) !== JSON.stringify(vals[id])) html += `<div class="k">before</div><div class="v">${esc(fmt(prev[id]))}</div>`;
+    html += '</div>';
+    if (incoming.length) {
+      html += `<div class="muted" style="margin:10px 0 4px;font-size:11px;text-transform:uppercase;letter-spacing:.05em">Depends on</div>` +
+        incoming.map(e => `<div style="font-size:12px;margin-bottom:3px"><span class="mono">${esc(e.src)}</span>
+          ${e.conditional ? `<span class="badge conditional">only when ${esc(e.predicate_desc)}</span>` : '<span class="badge neutral">always</span>'}</div>`).join('');
+    } else {
+      html += `<div class="muted" style="margin-top:8px;font-size:12px">Raw input — supplied by the caller.</div>`;
+    }
+    if (nodeCerts.length) {
+      html += `<div style="margin-top:10px">` + nodeCerts.map(c =>
+        `<a class="btn secondary small" href="${pageLink('/certificate', {id: c.cert_id})}">View certificate (${esc(certClassLabel(c.cls))})</a>`).join(' ') + '</div>';
+    }
+    document.getElementById('node-detail').innerHTML = html;
+  }
+
+  function renderTimeline() {
+    const tl = document.getElementById('tl');
+    const items = [`<div class="tl-item ${sel === -1 ? 'sel' : ''}" data-i="-1"><div class="t1">Initial</div><div class="t2">baseline state</div></div>`];
+    history.forEach(h => {
+      items.push(`<div class="tl-item ${sel === h.update_index ? 'sel' : ''}" data-i="${h.update_index}">
+        <div class="t1">#${h.update_index} ${esc(h.input_node)}</div>
+        <div class="t2">${esc(fmt(h.old_value))} → ${esc(fmt(h.new_value))}</div>
+        <div class="t2">${h.recomputed.length} recomputed · ${h.n_certificates} certs</div></div>`);
+    });
+    tl.innerHTML = items.join('');
+    tl.querySelectorAll('.tl-item').forEach(el => el.onclick = () => select(parseInt(el.dataset.i, 10)));
+    const s = tl.querySelector('.sel'); if (s) s.scrollIntoView({block: 'nearest', inline: 'nearest'});
+  }
+
+  function select(i) {
+    sel = i;
+    renderTimeline(); paintGraph(); renderSide();
+    document.getElementById('node-section').classList.add('hidden');
+  }
+
+  // ---- quick change ----------------------------------------------------
+  function renderChange() {
+    const box = document.getElementById('chg');
+    box.innerHTML = inputNodes.map(name => {
+      const cur = liveInputs[name];
+      let ctl;
+      if (typeof cur === 'boolean') ctl = `<select data-input="${esc(name)}" data-type="bool"><option value="true" ${cur ? 'selected' : ''}>true</option><option value="false" ${!cur ? 'selected' : ''}>false</option></select>`;
+      else if (typeof cur === 'number') ctl = `<input type="number" step="any" data-input="${esc(name)}" data-type="number" value="${cur}">`;
+      else ctl = `<input type="text" data-input="${esc(name)}" data-type="string" value="${esc(cur)}">`;
+      return `<div class="chg-row"><label title="${esc(name)}">${esc(name)}</label>${ctl}<button class="small secondary" data-set="${esc(name)}" ${session.live ? '' : 'disabled'}>set</button></div>`;
+    }).join('');
+    box.querySelectorAll('[data-set]').forEach(b => b.onclick = () => applyOne(b.dataset.set));
+  }
+
+  async function applyOne(name) {
+    const ctl = document.querySelector(`[data-input="${name}"]`);
+    let value;
+    if (ctl.dataset.type === 'bool') value = ctl.value === 'true';
+    else if (ctl.dataset.type === 'number') value = parseFloat(ctl.value);
+    else value = ctl.value;
+    if (JSON.stringify(value) === JSON.stringify(liveInputs[name])) { toast(`${name} is already ${fmt(value)}`); return; }
+    try {
+      const r = await post('/api/update', {session_id: sid, input_node: name, value});
+      liveInputs[name] = value;
+      await reload();
+      select(r.update_index);
+    } catch (e) { toast('Update failed: ' + e.message, true); }
+  }
+
+  async function reload() {
+    history = (await api(`/api/session/${sid}/history`)).updates;
+    certs = (await api(`/api/certificates/${sid}`)).certificates;
+  }
+
+  initGraph();
+  await reload();
+  renderChange();
+  const wanted = new URLSearchParams(location.search).get('u');
+  select(wanted !== null && history[+wanted] ? +wanted : (history.length ? history.length - 1 : -1));
+})();
+</script>
+</body>
+</html>

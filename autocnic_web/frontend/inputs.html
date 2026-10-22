@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoCNIC — Inputs</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="nav"></div>
+<div data-main>
+  <div class="page">
+    <div class="page-head">
+      <span class="eyebrow-tag">Step 2 of 4</span>
+      <h1>Set inputs</h1>
+      <p>Edit any number of inputs, then apply them as a scenario. Each change runs as its own certified update, in the order shown,
+        so you can inspect every step on the tracker.</p>
+    </div>
+
+    <div id="cards" class="grid cols-4"></div>
+
+    <div id="results-card" class="card hidden" style="margin-top:20px;">
+      <h2>Applied updates</h2>
+      <div id="results" class="result-list"></div>
+      <div style="margin-top:14px;" class="row">
+        <a class="btn" id="go-track" href="#">Watch on the tracker →</a>
+        <a class="btn secondary" id="go-certs" href="#">View certificates</a>
+      </div>
+    </div>
+  </div>
+  <div class="dock">
+    <span id="dock-msg" class="muted">No changes yet.</span>
+    <div class="spacer"></div>
+    <button class="secondary" id="reset-btn" disabled>Reset edits</button>
+    <button id="apply-btn" disabled>Apply changes</button>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+(async () => {
+  const session = await boot('inputs', {needSession: true});
+  if (!session) return;
+  const sid = session.session_id;
+  document.getElementById('go-track').href = pageLink('/track');
+  document.getElementById('go-certs').href = pageLink('/certificates');
+
+  // which nodes does each input feed, and through which conditional edges?
+  const feeds = {};
+  session.graph.edges.forEach(e => {
+    (feeds[e.src] = feeds[e.src] || []).push(e);
+  });
+
+  let current = {};   // last known server-side values
+  Object.entries(session.inputs).forEach(([k, v]) => { current[k] = v.current_value; });
+
+  const cards = document.getElementById('cards');
+  const applyBtn = document.getElementById('apply-btn');
+  const resetBtn = document.getElementById('reset-btn');
+
+  function controlFor(name, cur) {
+    if (typeof cur === 'boolean') {
+      return `<select data-input="${esc(name)}" data-type="bool"><option value="true" ${cur ? 'selected' : ''}>true</option><option value="false" ${!cur ? 'selected' : ''}>false</option></select>`;
+    }
+    if (typeof cur === 'number') return `<input type="number" step="any" data-input="${esc(name)}" data-type="number" value="${cur}">`;
+    return `<input type="text" data-input="${esc(name)}" data-type="string" value="${esc(cur)}">`;
+  }
+
+  function build() {
+    cards.innerHTML = '';
+    Object.keys(session.inputs).forEach(name => {
+      const out = feeds[name] || [];
+      const cond = out.filter(e => e.conditional).length;
+      const el = document.createElement('div');
+      el.className = 'card input-card';
+      el.dataset.card = name;
+      el.innerHTML = `<div class="name">${esc(name)}</div>
+        <div class="cur">current: <span class="mono" data-cur>${esc(fmt(current[name]))}</span></div>
+        ${controlFor(name, current[name])}
+        <div class="feeds">feeds ${out.length} node${out.length === 1 ? '' : 's'}${cond ? ` · <span style="color:var(--accent2)">${cond} conditional</span>` : ''}</div>`;
+      cards.appendChild(el);
+    });
+    cards.querySelectorAll('[data-input]').forEach(c => { c.addEventListener('input', refresh); c.addEventListener('change', refresh); });
+    refresh();
+  }
+
+  function readValue(ctrl) {
+    if (ctrl.dataset.type === 'bool') return ctrl.value === 'true';
+    if (ctrl.dataset.type === 'number') return parseFloat(ctrl.value);
+    return ctrl.value;
+  }
+
+  function pending() {
+    const out = [];
+    cards.querySelectorAll('[data-input]').forEach(c => {
+      const name = c.dataset.input;
+      const v = readValue(c);
+      if (c.dataset.type === 'number' && Number.isNaN(v)) return;
+      if (JSON.stringify(v) !== JSON.stringify(current[name])) out.push([name, v]);
+    });
+    return out;
+  }
+
+  function refresh() {
+    const p = pending();
+    const names = new Set(p.map(x => x[0]));
+    cards.querySelectorAll('[data-card]').forEach(c => c.classList.toggle('changed', names.has(c.dataset.card)));
+    applyBtn.disabled = !session.live || p.length === 0;
+    resetBtn.disabled = p.length === 0;
+    applyBtn.textContent = p.length > 1 ? `Apply ${p.length} changes` : 'Apply change';
+    document.getElementById('dock-msg').textContent = !session.live
+      ? 'Read-only session — re-analyze to make changes.'
+      : p.length ? `${p.length} pending change${p.length === 1 ? '' : 's'}: ${p.map(x => x[0]).join(', ')}` : 'No changes yet. Edit a value above.';
+  }
+
+  resetBtn.onclick = build;
+
+  applyBtn.onclick = async () => {
+    const p = pending();
+    if (!p.length) return;
+    applyBtn.disabled = true; resetBtn.disabled = true;
+    const box = document.getElementById('results');
+    document.getElementById('results-card').classList.remove('hidden');
+    box.innerHTML = '';
+    for (const [name, value] of p) {
+      try {
+        const r = await post('/api/update', {session_id: sid, input_node: name, value});
+        current[name] = value;
+        const skipped = r.certificates_issued.length;
+        box.insertAdjacentHTML('beforeend', `<div class="result-item"><div style="flex:1">
+          <div><span class="mono" style="font-weight:600">${esc(name)}</span> <span class="muted">${esc(fmt(r.old_value))} → </span><span class="mono">${esc(fmt(value))}</span></div>
+          <div class="muted" style="font-size:12px;margin-top:2px;">
+            recomputed <b style="color:var(--good)">${r.recomputed.length}</b>${r.recomputed.length ? ' (' + esc(r.recomputed.join(', ')) + ')' : ''} ·
+            certified-skipped <b style="color:var(--accent)">${skipped}</b> ·
+            model calls ${r.model_invocations_this_update}/${r.baseline_invocations_this_update}</div></div>
+          <a class="btn secondary small" href="${pageLink('/track', {u: r.update_index})}">View step</a></div>`);
+      } catch (e) {
+        box.insertAdjacentHTML('beforeend', `<div class="result-item"><span class="badge bad">FAILED</span><div><span class="mono">${esc(name)}</span> — ${esc(e.message)}</div></div>`);
+        toast('Update failed: ' + e.message, true);
+        break;
+      }
+    }
+    build();
+  };
+
+  build();
+})();
+</script>
+</body>
+</html>

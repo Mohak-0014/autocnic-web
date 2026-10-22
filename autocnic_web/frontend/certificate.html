@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoCNIC — Certificate</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="nav"></div>
+<div class="page" data-main>
+  <div class="actions">
+    <a class="btn secondary" id="back" href="#">← All certificates</a>
+    <div class="spacer"></div>
+    <button class="secondary" id="dl">Download JSON</button>
+    <button id="print">Print / Save PDF</button>
+  </div>
+  <div id="paper"></div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+(async () => {
+  const session = await boot('certs', {needSession: true});
+  if (!session) return;
+  const sid = session.session_id;
+  document.getElementById('back').href = pageLink('/certificates');
+  const id = new URLSearchParams(location.search).get('id');
+  const paper = document.getElementById('paper');
+
+  let c;
+  try { c = await api(`/api/certificate/${sid}/${id}`); }
+  catch (e) { paper.innerHTML = `<div class="empty"><h3>Certificate not found</h3><a class="btn" href="${pageLink('/certificates')}">Back to certificates</a></div>`; return; }
+
+  const history = (await api(`/api/session/${sid}/history`)).updates;
+  const upd = history.find(h => h.update_index === c.update_index);
+  const edges = edgeLookup(session.graph);
+  const accepted = !!c.verified_ok;
+  const vacuous = c.cls === 'VACUOUS';
+  const F = c.F || [];
+
+  const kind = vacuous
+    ? 'No dependency path exists from the changed input to this node, so the update cannot reach it.'
+    : 'A dependency path exists, but every edge that could carry the change out of the influenced set was inactive both before and after the update.';
+
+  const frontierRows = F.map(([s, d]) => {
+    const e = edges[s + '->' + d];
+    return `<tr><td class="mono">${esc(s)} → ${esc(d)}</td>
+      <td class="mono">${e && e.conditional ? esc(e.predicate_desc) : 'always active'}</td>
+      <td>inactive before &amp; after</td></tr>`;
+  }).join('');
+
+  paper.innerHTML = `
+  <div class="paper">
+    <div class="eyebrow">AutoCNIC · Session ${esc(sid)}</div>
+    <h1>Certificate of Non-Influence</h1>
+    <div class="sub">No. ${esc(c.cert_id)} · ${esc(fmtTime(c.issued_at))}</div>
+
+    <p class="statement">${certStatement(c)}</p>
+
+    <div class="verdict">
+      <div class="big-seal ${accepted ? '' : 'bad'}"><span class="tick">${accepted ? '✓' : '✕'}</span>${accepted ? 'VERIFIED' : 'REJECTED'}</div>
+      <div style="text-align:left">
+        <div><span class="pill ${vacuous ? 'vacuous' : 'conditional'}">${esc(c.cls)}</span></div>
+        <div class="note">Checker verdict: <b>${esc(c.checker_verdict)}</b></div>
+      </div>
+    </div>
+    <div class="note" style="text-align:center;margin-top:12px">${esc(kind)}</div>
+
+    <h3>The change</h3>
+    <div class="kvgrid">
+      <div class="k">Input changed</div><div class="v">${esc(c.input_node)}${upd ? ` &nbsp; ${esc(fmt(upd.old_value))} → ${esc(fmt(upd.new_value))}` : ''}</div>
+      <div class="k">Update number</div><div class="v">#${c.update_index}</div>
+      <div class="k">Node certified</div><div class="v">${esc(c.target)}</div>
+      <div class="k">Value retained</div><div class="v">${esc(fmt(c.retained_value))} <span style="color:#7a6a3a">(from state version ${esc(c.retained_at_version)})</span></div>
+    </div>
+
+    <h3>Influenced set</h3>
+    <div class="chain">${(c.A || []).map(n => `<span class="n ${n === c.input_node ? 'hi' : ''}">${esc(n)}</span>`).join('<span>·</span>')}
+      <span>⇏</span><span class="n tg">${esc(c.target)}</span></div>
+    <div class="note" style="text-align:center">The set of nodes the change could reach through active edges. The certified node is outside it.</div>
+
+    <h3>Frontier witness</h3>
+    ${F.length ? `<table><thead><tr><th>Edge leaving the set</th><th>Activation condition</th><th>Status</th></tr></thead><tbody>${frontierRows}</tbody></table>
+      <div class="note">Every edge that leaves the influenced set is listed. Each condition was false in both the pre-update and post-update state, so nothing crosses the boundary.</div>`
+      : `<div class="note">No edges leave the influenced set at all.</div>`}
+
+    <h3>Bindings</h3>
+    <div class="kvgrid">
+      <div class="k">Graph digest</div><div class="v">${esc(c.graph_ver)}</div>
+      <div class="k">State before</div><div class="v">${esc(c.pre_dig)}</div>
+      <div class="k">State after</div><div class="v">${esc(c.post_dig)}</div>
+    </div>
+    <div class="note">The checker confirmed these digests match the recorded graph and states. It never reran the influence analysis or called the underlying function.</div>
+  </div>`;
+
+  document.getElementById('print').onclick = () => window.print();
+  document.getElementById('dl').onclick = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(c, null, 2)], {type: 'application/json'}));
+    a.download = `certificate-${c.cert_id}.json`;
+    a.click();
+  };
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoCNIC — Certificates</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="nav"></div>
+<div class="page" data-main>
+  <div class="page-head">
+      <span class="eyebrow-tag">Step 4 of 4</span>
+    <h1>Certificates</h1>
+    <p>Each certificate proves that a node's value did not need recomputing after an input changed. A separate checker
+      validated every one, and they are stored on disk so they survive restarts.</p>
+  </div>
+
+  <div class="grid cols-4" id="tiles" style="margin-bottom:20px;"></div>
+
+  <div class="filters">
+    <select id="f-update"><option value="">All updates</option></select>
+    <select id="f-class"><option value="">All classes</option><option value="VACUOUS">Vacuous</option><option value="CONDITIONAL">Conditional</option></select>
+    <select id="f-target"><option value="">All nodes</option></select>
+    <select id="f-verdict"><option value="">Any verdict</option><option value="ok">Accepted</option><option value="bad">Rejected</option></select>
+    <div class="spacer"></div>
+    <span class="muted" id="count"></span>
+  </div>
+
+  <div id="grid" class="cert-grid"></div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+(async () => {
+  const session = await boot('certs', {needSession: true});
+  if (!session) return;
+  const sid = session.session_id;
+  const certs = (await api(`/api/certificates/${sid}`)).certificates;
+
+  const params = new URLSearchParams(location.search);
+  const fUpdate = document.getElementById('f-update'), fClass = document.getElementById('f-class'),
+        fTarget = document.getElementById('f-target'), fVerdict = document.getElementById('f-verdict');
+
+  [...new Set(certs.map(c => c.update_index))].sort((a, b) => b - a).forEach(u => {
+    const c = certs.find(x => x.update_index === u);
+    fUpdate.insertAdjacentHTML('beforeend', `<option value="${u}">Update #${u} · ${esc(c.input_node)}</option>`);
+  });
+  [...new Set(certs.map(c => c.target))].sort().forEach(t => fTarget.insertAdjacentHTML('beforeend', `<option>${esc(t)}</option>`));
+  if (params.get('u') !== null) fUpdate.value = params.get('u');
+
+  const ok = certs.filter(c => c.verified_ok).length;
+  const vac = certs.filter(c => c.cls === 'VACUOUS').length;
+  document.getElementById('tiles').innerHTML = `
+    <div class="stat"><div class="v">${certs.length}</div><div class="l">certificates issued</div></div>
+    <div class="stat good"><div class="v">${ok}<span class="muted" style="font-size:14px"> / ${certs.length}</span></div><div class="l">accepted by checker</div></div>
+    <div class="stat"><div class="v">${vac}</div><div class="l">vacuous (no path)</div></div>
+    <div class="stat"><div class="v">${certs.length - vac}</div><div class="l">conditional (path blocked)</div></div>`;
+
+  function render() {
+    const u = fUpdate.value, cl = fClass.value, t = fTarget.value, v = fVerdict.value;
+    const rows = certs.filter(c =>
+      (u === '' || String(c.update_index) === u) && (!cl || c.cls === cl) && (!t || c.target === t) &&
+      (!v || (v === 'ok') === !!c.verified_ok)).sort((a, b) => b.issued_at - a.issued_at || a.target.localeCompare(b.target));
+    document.getElementById('count').textContent = `${rows.length} shown`;
+    const grid = document.getElementById('grid');
+    if (!rows.length) {
+      grid.innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>${certs.length ? 'No certificates match' : 'No certificates yet'}</h3>
+        <p>${certs.length ? 'Clear a filter to see more.' : 'Certificates appear when an input change lets a node be skipped.'}</p>
+        ${certs.length ? '' : `<a class="btn" href="${pageLink('/inputs')}">Change an input</a>`}</div>`;
+      return;
+    }
+    grid.innerHTML = rows.map(c => `
+      <a class="cert-card" href="${pageLink('/certificate', {id: c.cert_id})}">
+        <div class="seal ${c.verified_ok ? '' : 'bad'}">${c.verified_ok ? '✓' : '✕'}</div>
+        <div class="kind">Certificate of non-influence</div>
+        <div class="target">${esc(c.target)}</div>
+        <div class="line">retained <b class="mono">${esc(fmt(c.retained_value))}</b> after <b class="mono">${esc(c.input_node)}</b> changed</div>
+        <div class="foot"><span class="pill ${c.cls === 'VACUOUS' ? 'vacuous' : 'conditional'}">${esc(c.cls)}</span>
+          <span>update #${c.update_index} · ${esc(c.cert_id)}</span></div>
+      </a>`).join('');
+  }
+  [fUpdate, fClass, fTarget, fVerdict].forEach(f => f.onchange = render);
+  render();
+})();
+</script>
+</body>
+</html>

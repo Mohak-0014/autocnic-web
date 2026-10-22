@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoCNIC — Analyze</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="nav"></div>
+
+<section class="hero">
+  <div class="hero-inner">
+    <div>
+      <div class="pill-tag"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Every skipped computation comes with a proof</div>
+      <h1>Recompute only what a change <em>can actually affect.</em></h1>
+      <p class="lead">Point AutoCNIC at a project. It discovers which dependencies are conditional, then issues an independently verified certificate for every value it safely skips when an input changes.</p>
+    </div>
+    <div class="hero-art">
+      <svg viewBox="0 0 460 340" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <rect x="0.5" y="0.5" width="459" height="339" rx="22" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.18)"/>
+        <g stroke="#94a3b8" stroke-width="2" stroke-linecap="round">
+          <path d="M92 70 L200 120"/><path d="M92 150 L200 120"/><path d="M92 150 L200 200" stroke-dasharray="5 5"/>
+          <path d="M92 230 L200 200"/><path d="M200 120 L330 160" stroke="#34d399" stroke-width="3"/>
+          <path d="M200 200 L330 160" stroke="#fbbf24" stroke-width="3" stroke-dasharray="5 5"/>
+        </g>
+        <g font-family="ui-monospace,Consolas,monospace" font-size="12" font-weight="700" text-anchor="middle">
+          <rect x="34" y="52" width="116" height="36" rx="10" fill="#4f46e5"/><text x="92" y="75" fill="#fff">unit_price</text>
+          <rect x="34" y="132" width="116" height="36" rx="10" fill="#1e293b" stroke="#6366f1" stroke-width="2"/><text x="92" y="155" fill="#e2e8f0">device_risk</text>
+          <rect x="34" y="212" width="116" height="36" rx="10" fill="#1e293b" stroke="#6366f1" stroke-width="2"/><text x="92" y="235" fill="#e2e8f0">quantity</text>
+          <rect x="146" y="102" width="108" height="36" rx="10" fill="#064e3b" stroke="#34d399" stroke-width="2"/><text x="200" y="125" fill="#a7f3d0">subtotal</text>
+          <rect x="146" y="182" width="108" height="36" rx="10" fill="#1e293b" stroke="#fbbf24" stroke-width="2"/><text x="200" y="205" fill="#fde68a">fraud_score</text>
+          <rect x="272" y="142" width="116" height="36" rx="10" fill="#064e3b" stroke="#34d399" stroke-width="2"/><text x="330" y="165" fill="#a7f3d0">order_total</text>
+        </g>
+        <g transform="translate(232 232)">
+          <rect width="196" height="76" rx="12" fill="#fffdf6" stroke="#e3d8b4"/>
+          <rect x="5" y="5" width="186" height="66" rx="8" fill="none" stroke="#c9b87a" stroke-opacity=".6"/>
+          <text x="16" y="24" font-family="Inter,sans-serif" font-size="7.5" font-weight="700" letter-spacing="1" fill="#8a7638">CERTIFICATE OF NON-INFLUENCE</text>
+          <text x="16" y="46" font-family="ui-monospace,Consolas,monospace" font-size="15" font-weight="800" fill="#2b2618">fraud_score</text>
+          <text x="16" y="62" font-family="Inter,sans-serif" font-size="10" fill="#5c5233">retained 0.05 · conditional</text>
+          <circle cx="164" cy="38" r="17" fill="none" stroke="#1e8a5a" stroke-width="2"/>
+          <path d="M156 38 l6 6 l11 -12" stroke="#1e8a5a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        </g>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<div class="analyze-wrap">
+  <div class="analyze-card">
+    <label for="repo-url">Project to analyze</label>
+    <div class="analyze-box">
+      <input id="repo-url" type="text" class="mono" placeholder="GitHub clone URL, file:// URL, or a local folder path" autocomplete="off">
+      <button id="analyze-btn">Analyze project</button>
+    </div>
+    <div id="progress" class="progress hidden"><i></i></div>
+    <div id="progress-note" class="muted hidden" style="margin-top:10px;font-size:12.5px;">Cloning, importing the pipeline and running perturbation experiments &mdash; a few seconds&hellip;</div>
+    <div class="muted" style="margin-top:10px;font-size:12px;">The project needs an <code>autocnic_pipeline.py</code> at its root exposing <code>PIPELINE</code> and <code>SAMPLERS</code>.</div>
+  </div>
+</div>
+
+<div class="page" data-main style="padding-top:28px;">
+  <div class="grid cols-4" id="totals"></div>
+
+  <section class="section">
+    <div class="section-head"><h2>Why teams use it</h2><p>Stop re-running expensive steps that a change can't touch &mdash; and be able to prove it.</p></div>
+    <div class="grid cols-3">
+      <div class="card feature">
+        <div class="ico"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M8.3 7l7.4 4M8.3 17l7.4-4"/></svg></div>
+        <h3>Discovers conditional dependencies</h3>
+        <p>Controlled perturbation experiments reveal which edges only matter under a condition, and mine the predicate that gates each one.</p>
+      </div>
+      <div class="card feature">
+        <div class="ico g"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/></svg></div>
+        <h3>Recomputes only what's affected</h3>
+        <p>An input change re-runs just the nodes reachable through active edges. Everything else keeps its value.</p>
+      </div>
+      <div class="card feature">
+        <div class="ico o"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg></div>
+        <h3>Certificates you can verify</h3>
+        <p>Every skipped node gets a certificate that a separate checker validates without rerunning any analysis. All are saved to disk.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><h2>How it works</h2><p>Four steps, one page each.</p></div>
+    <div class="flow">
+      <div class="f"><div class="num">1</div><b>Analyze</b><span>Clone the project and discover its conditional dependency graph.</span></div>
+      <div class="f"><div class="num">2</div><b>Set inputs</b><span>Change one or several inputs as a scenario.</span></div>
+      <div class="f"><div class="num">3</div><b>Track</b><span>Watch what was recomputed and what was safely skipped, step by step.</span></div>
+      <div class="f"><div class="num">4</div><b>Verify</b><span>Inspect and download the certificate for every skipped node.</span></div>
+    </div>
+  </section>
+
+  <div class="section">
+    <div class="card">
+      <h2>Previous sessions</h2>
+      <div id="sessions"><span class="muted">Loading…</span></div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+(async () => {
+  await boot('home');
+
+  const urlInput = document.getElementById('repo-url');
+  const btn = document.getElementById('analyze-btn');
+
+  async function analyze(url) {
+    url = (url || urlInput.value).trim();
+    if (!url) { toast('Enter a repository URL or folder path first', true); return; }
+    urlInput.value = url;
+    btn.disabled = true; btn.textContent = 'Analyzing…';
+    document.getElementById('progress').classList.remove('hidden');
+    document.getElementById('progress-note').classList.remove('hidden');
+    try {
+      const d = await post('/api/analyze', {repo_url: url});
+      setSessionId(d.session_id);
+      location.href = '/inputs?s=' + d.session_id;
+    } catch (e) {
+      toast('Analyze failed: ' + e.message, true);
+      btn.disabled = false; btn.textContent = 'Analyze project';
+      document.getElementById('progress').classList.add('hidden');
+      document.getElementById('progress-note').classList.add('hidden');
+    }
+  }
+  btn.onclick = () => analyze();
+  urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') analyze(); });
+
+  // sessions + live totals
+  try {
+    const {sessions} = await api('/api/sessions');
+    const sum = k => sessions.reduce((a, s) => a + (s[k] || 0), 0);
+    document.getElementById('totals').innerHTML = `
+      <div class="stat"><div class="v">${sessions.length}</div><div class="l">projects analyzed</div></div>
+      <div class="stat info"><div class="v">${sum('n_conditional')}</div><div class="l">conditional edges found</div></div>
+      <div class="stat warn"><div class="v">${sum('n_updates')}</div><div class="l">input updates processed</div></div>
+      <div class="stat good"><div class="v">${sum('n_certificates')}</div><div class="l">certificates issued</div></div>`;
+    const box = document.getElementById('sessions');
+    if (!sessions.length) { box.innerHTML = '<span class="muted">No sessions yet — analyze a project to get started.</span>'; return; }
+    box.innerHTML = `<table><thead><tr><th>Project</th><th>Updates</th><th>Certs</th><th></th></tr></thead><tbody>
+      ${sessions.slice(0, 6).map(s => `<tr>
+        <td><b>${esc(repoName(s.repo_url).replace('autocnic-demo-', ''))}</b> ${s.live ? '<span class="badge ok">live</span>' : '<span class="badge neutral">read-only</span>'}
+          <div class="muted mono" style="font-size:11px">${esc(s.session_id)} · ${esc(fmtTime(s.created_at))}</div></td>
+        <td>${s.n_updates}</td><td>${s.n_certificates}</td>
+        <td style="text-align:right"><a class="btn secondary small" href="/track?s=${esc(s.session_id)}">Open</a></td></tr>`).join('')}
+      </tbody></table>`;
+  } catch (e) { document.getElementById('sessions').textContent = 'Could not load sessions.'; }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime data written by the backend
+autocnic_web/backend/_clones/
+autocnic_web/backend/cert_store/*
+!autocnic_web/backend/cert_store/.gitkeep
+*.log
