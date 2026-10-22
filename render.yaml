@@ -1,0 +1,14 @@
+# One-click deploy on Render: New > Blueprint > pick this repo.
+services:
+  - type: web
+    name: autocnic-web
+    runtime: docker
+    plan: starter            # persistent disks need a paid plan; drop `disk` to use free
+    healthCheckPath: /healthz
+    envVars:
+      - key: AUTOCNIC_BASIC_AUTH
+        sync: false          # set "user:password" in the dashboard to require a login
+    disk:
+      name: autocnic-data
+      mountPath: /data
+      sizeGB: 1

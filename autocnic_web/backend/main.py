@@ -10,36 +10,64 @@ FastAPI backend for the AutoCNIC web demo. Serves the frontend and exposes:
   GET  /api/certificate/{id}/{cert_id}                     -> one certificate
   GET  /api/sessions                                       -> all sessions on disk
   GET  /api/session/{id}/history                           -> per-update timeline
-  Pages: / (analyze), /inputs, /track, /certificates, /certificate?s=&id=
+  GET  /api/demos                                          -> bundled example projects
+  GET  /api/template.zip                                   -> starter project to copy
+  GET  /healthz                                            -> liveness probe
+  Pages: / (analyze), /guide, /inputs, /track, /certificates, /certificate?s=&id=
 
 Run:  pip install -r requirements.txt && python main.py
-Then open http://localhost:8000
+Then open http://localhost:8000 . Configuration: see settings.py.
 """
 
 from __future__ import annotations
 
+import base64
+import io
 import os
+import secrets
 import traceback
+import zipfile
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import runner
+import settings
 
 app = FastAPI(title="AutoCNIC Web Demo")
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
-)
+if settings.CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware, allow_origins=settings.CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"],
+    )
 
-FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend")
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FRONTEND_DIR = os.path.join(APP_DIR, "frontend")
+TEMPLATE_DIR = os.path.join(APP_DIR, "template")
+
+
+@app.middleware("http")
+async def basic_auth(request: Request, call_next):
+    """Optional shared password (AUTOCNIC_BASIC_AUTH=user:pass). Analyze runs the
+    submitted repo's code on this server, so a public deployment should set it."""
+    if settings.BASIC_AUTH and request.url.path != "/healthz":
+        expected = "Basic " + base64.b64encode(settings.BASIC_AUTH.encode()).decode()
+        if not secrets.compare_digest(request.headers.get("authorization", ""), expected):
+            return Response("authentication required", status_code=401,
+                            headers={"WWW-Authenticate": 'Basic realm="AutoCNIC"'})
+    return await call_next(request)
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
 
 
 class AnalyzeRequest(BaseModel):
-    repo_url: str
-    n_trials_per_edge: int = 300
+    repo_url: str = Field(max_length=500)
+    n_trials_per_edge: int = Field(300, ge=10)
     seed: int = 0
 
 
@@ -54,8 +82,10 @@ def analyze(req: AnalyzeRequest):
     repo_url = req.repo_url.strip()
     if not repo_url:
         raise HTTPException(400, "repo_url is required")
+    n_trials = min(req.n_trials_per_edge, settings.MAX_TRIALS)
     try:
-        session = runner.analyze_repo(repo_url, n_trials_per_edge=req.n_trials_per_edge, seed=req.seed)
+        with runner.LOCK:
+            session = runner.analyze_repo(repo_url, n_trials_per_edge=n_trials, seed=req.seed)
     except runner.RepoLoadError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -80,7 +110,8 @@ def update(req: UpdateRequest):
     if session is None:
         raise HTTPException(404, "unknown session_id (re-analyze the repo)")
     try:
-        result = runner.apply_update(session, req.input_node, req.value)
+        with runner.LOCK:
+            result = runner.apply_update(session, req.input_node, req.value)
     except runner.RepoLoadError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -104,7 +135,7 @@ def _cumulative_from_history(session_id: str) -> dict:
     }
 
 
-DEMO_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "demo_repos")
+DEMO_DIR = runner.DEMO_DIR
 
 DEMO_BLURBS = {
     "autocnic-demo-shopfront": "Multi-module order pricing project (package + tests). Best starting point.",
@@ -121,8 +152,22 @@ def list_demos():
         for name in sorted(os.listdir(DEMO_DIR)):
             path = os.path.join(DEMO_DIR, name)
             if os.path.isfile(os.path.join(path, "autocnic_pipeline.py")):
-                demos.append({"name": name, "path": path, "blurb": DEMO_BLURBS.get(name, "")})
-    return {"demos": demos}
+                demos.append({"name": name, "source": f"demo:{name}", "blurb": DEMO_BLURBS.get(name, "")})
+    return {"demos": demos, "allow_local_paths": settings.ALLOW_LOCAL_PATHS}
+
+
+@app.get("/api/template.zip")
+def template_zip():
+    """The starter project in ../template, zipped, for users to copy into their repo."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for root, dirs, files in os.walk(TEMPLATE_DIR):
+            dirs[:] = [d for d in dirs if d not in ("__pycache__", ".pytest_cache")]
+            for f in files:
+                full = os.path.join(root, f)
+                z.write(full, os.path.join("autocnic-starter", os.path.relpath(full, TEMPLATE_DIR)))
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="autocnic-starter.zip"'})
 
 
 @app.get("/api/sessions")
@@ -199,6 +244,11 @@ def index():
     return _page("index.html")
 
 
+@app.get("/guide")
+def guide_page():
+    return _page("guide.html")
+
+
 @app.get("/inputs")
 def inputs_page():
     return _page("inputs.html")
@@ -221,4 +271,5 @@ def certificate_page():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    # One process only: live sessions are held in memory.
+    uvicorn.run("main:app", host=settings.HOST, port=settings.PORT, reload=False)

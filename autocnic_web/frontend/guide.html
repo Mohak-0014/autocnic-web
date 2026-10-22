@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoCNIC — Guide</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="nav"></div>
+<div class="page guide" data-main>
+  <div class="page-head">
+    <span class="eyebrow-tag">Guide</span>
+    <h1>Preparing a repo for AutoCNIC</h1>
+    <p>AutoCNIC analyzes projects organised as named computation steps. Your repo needs one extra file,
+      <code>autocnic_pipeline.py</code>, that tells the app what the inputs and steps are. Your own code stays as it is.</p>
+    <div class="row" style="margin-top:16px;">
+      <a class="btn" href="/api/template.zip">Download the starter template</a>
+      <a class="btn secondary" href="/">Back to Analyze</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>1. Repo layout</h2>
+    <div class="code">your-repo/
+├── autocnic_pipeline.py   <span class="c"># required: PIPELINE, SAMPLERS, INITIAL_INPUTS</span>
+└── my_project/            <span class="c"># your code, any package name</span>
+    ├── __init__.py
+    └── logic.py           <span class="c"># plain functions, one per step</span></div>
+    <p class="muted">The file can also live in a subfolder. If the repo holds exactly one <code>autocnic_pipeline.py</code>
+      (up to 3 folders deep), the app finds it. If it holds several, paste the GitHub link to the folder you want.</p>
+  </div>
+
+  <div class="card">
+    <h2>2. Write your step functions</h2>
+    <p>Each step is a plain function. <b>Name its parameters after the inputs or steps it reads</b>; that is how
+      the app wires the graph.</p>
+    <div class="code" data-copy><span class="c"># my_project/logic.py</span>
+def ticket_price(base_fare, seats):
+    return round(base_fare * seats, 2)
+
+
+def booking_fee(member, card_fee_rate, ticket_price):
+    if member:            <span class="c"># members pay nothing, so the fee only
+</span>        return 0.0        <span class="c"># depends on card_fee_rate for non-members</span>
+    return round(ticket_price * card_fee_rate, 2)
+
+
+def total_due(ticket_price, booking_fee):
+    return round(ticket_price + booking_fee, 2)</div>
+    <p class="muted">You don't declare which dependencies are conditional. The app finds out by running experiments,
+      for example that <code>booking_fee</code> only depends on <code>card_fee_rate</code> when <code>member</code> is false.</p>
+  </div>
+
+  <div class="card">
+    <h2>3. Add <code>autocnic_pipeline.py</code></h2>
+    <div class="code" data-copy>import random
+
+from autocnic.pipeline import Pipeline     <span class="c"># provided by the app</span>
+from my_project.logic import ticket_price, booking_fee, total_due
+
+PIPELINE = Pipeline("ticket_checkout")
+
+PIPELINE.input("base_fare")
+PIPELINE.input("seats")
+PIPELINE.input("member")
+PIPELINE.input("card_fee_rate")
+
+PIPELINE.step("ticket_price")(ticket_price)
+PIPELINE.step("booking_fee")(booking_fee)
+PIPELINE.step("total_due")(total_due)
+
+_rng = random.Random(0)
+SAMPLERS = {                               <span class="c"># one random-value function per input</span>
+    "base_fare": lambda: round(_rng.uniform(10, 200), 2),
+    "seats": lambda: _rng.randint(1, 6),
+    "member": lambda: _rng.choice([True, False]),
+    "card_fee_rate": lambda: round(_rng.uniform(0.0, 0.05), 3),
+}
+
+INITIAL_INPUTS = {                         <span class="c"># optional starting values</span>
+    "base_fare": 80.0, "seats": 2, "member": False, "card_fee_rate": 0.02,
+}</div>
+    <table>
+      <thead><tr><th>Name</th><th>Required</th><th>What it is</th></tr></thead>
+      <tbody>
+        <tr><td><code>PIPELINE</code></td><td>Yes</td><td>A <code>Pipeline</code> with at least one <code>.input()</code> and one <code>.step()</code>.</td></tr>
+        <tr><td><code>SAMPLERS</code></td><td>Yes</td><td>A dict with a function for <b>every</b> input that returns a realistic random value. Cover the whole range, including values that switch branches.</td></tr>
+        <tr><td><code>INITIAL_INPUTS</code></td><td>No</td><td>Starting values. Any input left out gets one sampler draw.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>4. Other ways to declare reads</h2>
+    <ul>
+      <li><b>By parameter name</b> (default): <code>PIPELINE.step("subtotal")(compute_subtotal)</code>.</li>
+      <li><b>Explicitly</b>, to pin the exact dependency list:
+        <code>PIPELINE.step("subtotal", reads=["unit_price", "quantity"])(fn)</code>. The names must still match
+        the function's parameters.</li>
+      <li><b>Module globals</b>: <code>PIPELINE.step("fee", infer_reads=True)(fn)</code> uses static analysis to
+        find inputs the function reads as bare global names.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>5. Rules that avoid most errors</h2>
+    <ul>
+      <li>Only the <b>Python standard library</b> and modules <b>inside your repo</b> are available. No third-party
+        packages (numpy, pandas, …), and don't add <code>autocnic</code> to your requirements.</li>
+      <li>Keep step functions <b>pure</b>: no network, file access, clocks or randomness inside them.</li>
+      <li>Steps must accept <b>any value the samplers can produce</b>. A crash during discovery stops the analysis.</li>
+      <li>Put all imports at the <b>top</b> of <code>autocnic_pipeline.py</code>.</li>
+      <li>Each package folder needs an <code>__init__.py</code>.</li>
+      <li>No cycles: a step can't read itself or anything that reads it.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>6. Point the app at your repo</h2>
+    <p>The Analyze box accepts any of these (the repo must be <b>public</b>):</p>
+    <div class="code">owner/repo
+https://github.com/owner/repo
+https://github.com/owner/repo/tree/main/path/to/folder   <span class="c"># a branch or a subfolder</span>
+https://gitlab.com/owner/repo.git                        <span class="c"># any git clone URL</span></div>
+    <p class="muted">To try your changes before pushing, run the app locally (see the README) and paste a local
+      folder path.</p>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+(async () => {
+  await boot('guide');
+  document.querySelectorAll('.code[data-copy]').forEach(block => {
+    const b = document.createElement('button');
+    b.className = 'small copy'; b.textContent = 'Copy';
+    b.onclick = async () => {
+      const text = [...block.childNodes].filter(n => n !== b).map(n => n.textContent).join('');
+      try { await navigator.clipboard.writeText(text); b.textContent = 'Copied'; }
+      catch (e) { b.textContent = 'Copy failed'; }
+      setTimeout(() => { b.textContent = 'Copy'; }, 1500);
+    };
+    block.prepend(b);
+  });
+})();
+</script>
+</body>
+</html>

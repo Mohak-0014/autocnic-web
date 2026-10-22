@@ -50,12 +50,18 @@
   <div class="analyze-card">
     <label for="repo-url">Project to analyze</label>
     <div class="analyze-box">
-      <input id="repo-url" type="text" class="mono" placeholder="GitHub clone URL, file:// URL, or a local folder path" autocomplete="off">
+      <input id="repo-url" type="text" class="mono" placeholder="https://github.com/owner/repo  or  owner/repo" autocomplete="off" spellcheck="false">
       <button id="analyze-btn">Analyze project</button>
     </div>
     <div id="progress" class="progress hidden"><i></i></div>
     <div id="progress-note" class="muted hidden" style="margin-top:10px;font-size:12.5px;">Cloning, importing the pipeline and running perturbation experiments &mdash; a few seconds&hellip;</div>
-    <div class="muted" style="margin-top:10px;font-size:12px;">The project needs an <code>autocnic_pipeline.py</code> at its root exposing <code>PIPELINE</code> and <code>SAMPLERS</code>.</div>
+    <div id="analyze-error" class="error-panel hidden"></div>
+    <div class="demo-row" id="demos"></div>
+    <div class="muted" style="margin-top:12px;font-size:12.5px;">
+      The project needs an <code>autocnic_pipeline.py</code> defining <code>PIPELINE</code> and <code>SAMPLERS</code>.
+      <a href="/guide">How to prepare your repo</a> &middot; <a href="/api/template.zip">Download the starter template</a>
+      <span id="local-note"></span>
+    </div>
   </div>
 </div>
 
@@ -114,6 +120,7 @@
     if (!url) { toast('Enter a repository URL or folder path first', true); return; }
     urlInput.value = url;
     btn.disabled = true; btn.textContent = 'Analyzing…';
+    document.getElementById('analyze-error').classList.add('hidden');
     document.getElementById('progress').classList.remove('hidden');
     document.getElementById('progress-note').classList.remove('hidden');
     try {
@@ -121,13 +128,34 @@
       setSessionId(d.session_id);
       location.href = '/inputs?s=' + d.session_id;
     } catch (e) {
-      toast('Analyze failed: ' + e.message, true);
+      showAnalyzeError(e.message);
       btn.disabled = false; btn.textContent = 'Analyze project';
       document.getElementById('progress').classList.add('hidden');
       document.getElementById('progress-note').classList.add('hidden');
     }
   }
+  function showAnalyzeError(msg) {
+    const box = document.getElementById('analyze-error');
+    box.innerHTML = `<b>Could not analyze this project</b><div class="mono">${esc(msg)}</div>
+      <div>Check that the repo is public and follows the <a href="/guide">expected layout</a>, or start from the
+      <a href="/api/template.zip">starter template</a>.</div>`;
+    box.classList.remove('hidden');
+  }
+
   btn.onclick = () => analyze();
+
+  try {
+    const {demos, allow_local_paths} = await api('/api/demos');
+    if (demos.length) {
+      const row = document.getElementById('demos');
+      row.innerHTML = '<span class="muted">Try a bundled example:</span>' + demos.map(d =>
+        `<button class="secondary small" data-src="${esc(d.source)}" title="${esc(d.blurb)}">${esc(d.name.replace('autocnic-demo-', ''))}</button>`).join('');
+      row.querySelectorAll('button').forEach(b => b.onclick = () => analyze(b.dataset.src));
+    }
+    if (allow_local_paths) {
+      document.getElementById('local-note').innerHTML = ' &middot; Local folder paths also work on this server.';
+    }
+  } catch (e) { /* demos are optional */ }
   urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') analyze(); });
 
   // sessions + live totals

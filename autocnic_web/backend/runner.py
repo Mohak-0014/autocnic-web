@@ -31,18 +31,32 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
+import shutil
+import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import settings
+
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
-CLONE_ROOT = os.path.join(BACKEND_DIR, "_clones")
-CERT_STORE_DIR = os.path.join(BACKEND_DIR, "cert_store")
+DEMO_DIR = os.path.join(os.path.dirname(BACKEND_DIR), "demo_repos")
+CLONE_ROOT = os.path.join(settings.DATA_DIR, "_clones")
+CERT_STORE_DIR = os.path.join(settings.DATA_DIR, "cert_store")
 os.makedirs(CLONE_ROOT, exist_ok=True)
 os.makedirs(CERT_STORE_DIR, exist_ok=True)
+
+PIPELINE_FILE = "autocnic_pipeline.py"
+
+# Loading a repo mutates sys.path / sys.modules and the session table, and
+# Pipeline.run_once patches step functions' globals -- none of that is
+# thread-safe, so analyze and update run one at a time.
+LOCK = threading.Lock()
 
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
@@ -77,35 +91,152 @@ class Session:
 SESSIONS: Dict[str, Session] = {}
 
 
-def _clone_repo(repo_url: str, session_id: str) -> str:
+GUIDE_HINT = "See the Guide page (/guide) for the expected repo layout and a starter template."
+
+
+@dataclass
+class Source:
+    """Where a project comes from, parsed from what the user typed."""
+    kind: str                  # "remote" (git clone) or "local" (folder copy)
+    location: str              # clone URL or folder path
+    ref: Optional[str] = None  # branch/tag from a GitHub /tree/<ref>/ URL
+    subdir: str = ""           # folder inside the repo holding autocnic_pipeline.py
+
+
+_GITHUB_WEB = re.compile(
+    r"^https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?"
+    r"(?:/(?:tree|blob)/([^/]+)(?:/(.*))?)?/?$"
+)
+_SHORTHAND = re.compile(r"^([\w.-]+)/([\w.-]+)$")
+_REMOTE = re.compile(r"^(https?://|git@[\w.-]+:)[^\s]+$")
+
+
+def resolve_source(text: str) -> Source:
+    """Accepts a GitHub URL (including /tree/<branch>/<folder> links copied from
+    the browser), `owner/repo` shorthand, any https/ssh git URL, `demo:<name>`
+    for a bundled project, or -- when enabled -- a local folder / file:// URL."""
+    text = text.strip()
+    if text.startswith("demo:"):
+        name = text[len("demo:"):]
+        path = os.path.join(DEMO_DIR, name)
+        if "/" in name or "\\" in name or not os.path.isdir(path):
+            raise RepoLoadError(f"unknown bundled project: {name!r}")
+        return Source("local", path)
+
+    is_file_url = text.lower().startswith("file://")
+    if is_file_url or os.path.isabs(text) or os.path.isdir(text):
+        if not settings.ALLOW_LOCAL_PATHS:
+            raise RepoLoadError(
+                "local folders and file:// URLs are disabled on this server -- push the "
+                "project to GitHub (it can be private only if the server has access) and "
+                "paste its URL instead."
+            )
+        if is_file_url:
+            return Source("remote", text)
+        if not os.path.isdir(text):
+            raise RepoLoadError(f"folder not found: {text}")
+        return Source("local", text)
+
+    m = _GITHUB_WEB.match(text)
+    if m:
+        owner, repo, ref, sub = m.groups()
+        return Source("remote", f"https://github.com/{owner}/{repo}.git", ref, (sub or "").strip("/"))
+    m = _SHORTHAND.match(text)
+    if m:
+        return Source("remote", f"https://github.com/{m.group(1)}/{m.group(2)}.git")
+    if _REMOTE.match(text):
+        return Source("remote", text)
+    raise RepoLoadError(
+        "could not read that as a repository. Paste a GitHub URL "
+        "(https://github.com/owner/repo), owner/repo, or a git clone URL."
+    )
+
+
+def _clone_repo(source: Source, session_id: str) -> str:
     dest = os.path.join(CLONE_ROOT, session_id)
     if os.path.exists(dest):
         raise RepoLoadError(f"clone target already exists: {dest}")
-    if os.path.isdir(repo_url):
+    if source.kind == "local":
         # Local project folder: copy it instead of `git clone` (no GitHub push needed).
-        import shutil
-        shutil.copytree(repo_url, dest, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache"))
+        shutil.copytree(source.location, dest, ignore=shutil.ignore_patterns(
+            ".git", "__pycache__", ".pytest_cache", ".venv", "venv", "node_modules"))
         return dest
+    cmd = ["git", "clone", "--depth", "1"]
+    if source.ref:
+        cmd += ["--branch", source.ref]
+    cmd += ["--", source.location, dest]
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")  # fail fast on private repos instead of hanging
     try:
-        subprocess.run(
-            ["git", "clone", "--depth", "1", repo_url, dest],
-            check=True, capture_output=True, text=True, timeout=60,
-        )
+        subprocess.run(cmd, check=True, capture_output=True, text=True,
+                       timeout=settings.CLONE_TIMEOUT, env=env)
     except subprocess.CalledProcessError as e:
-        raise RepoLoadError(f"git clone failed: {e.stderr.strip()[-800:]}")
+        err = "\n".join(l for l in e.stderr.strip().splitlines() if not l.startswith("Cloning into"))
+        hint = ""
+        if "could not read Username" in err or "Authentication failed" in err or "not found" in err.lower():
+            hint = " -- check the URL, and note that private repos can't be cloned by this server."
+        raise RepoLoadError(f"git clone failed: {err[-600:]}{hint}")
     except subprocess.TimeoutExpired:
-        raise RepoLoadError("git clone timed out after 60s")
+        _rmtree(dest)
+        raise RepoLoadError(f"git clone timed out after {settings.CLONE_TIMEOUT}s")
     return dest
 
 
-def _load_pipeline_module(repo_dir: str):
-    entry = os.path.join(repo_dir, "autocnic_pipeline.py")
-    if not os.path.isfile(entry):
+def _rmtree(path: str):
+    """rmtree that also removes read-only files (git objects on Windows)."""
+    def make_writable_and_retry(func, p, _exc):
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=make_writable_and_retry)
+        else:
+            shutil.rmtree(path, onerror=make_writable_and_retry)
+    except OSError:
+        pass
+
+
+_SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules", ".pytest_cache", ".tox"}
+
+
+def _find_pipeline_dir(repo_dir: str, subdir: str) -> str:
+    """Folder containing autocnic_pipeline.py: the requested subfolder if one
+    was given, else the repo root, else the only match within 3 levels."""
+    base = os.path.normpath(os.path.join(repo_dir, subdir))
+    if not base.startswith(os.path.normpath(repo_dir)) or not os.path.isdir(base):
+        raise RepoLoadError(f"folder {subdir!r} does not exist in the repo")
+    if os.path.isfile(os.path.join(base, PIPELINE_FILE)):
+        return base
+    found = []
+    for root, dirs, files in os.walk(base):
+        depth = os.path.relpath(root, base).count(os.sep) + (root != base)
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS] if depth < 3 else []
+        if PIPELINE_FILE in files:
+            found.append(root)
+    if len(found) == 1:
+        return found[0]
+    if found:
+        rels = ", ".join(os.path.relpath(f, repo_dir).replace(os.sep, "/") for f in found)
         raise RepoLoadError(
-            "repo does not contain autocnic_pipeline.py at its root -- this app only "
-            "works with repos that follow the AutoCNIC pipeline convention (see the "
-            "bundled demo repos for the exact shape expected)."
+            f"found {PIPELINE_FILE} in several folders ({rels}). Paste the GitHub link to the "
+            f"one you want (…/tree/<branch>/<folder>)."
         )
+    raise RepoLoadError(f"no {PIPELINE_FILE} found in the repo. {GUIDE_HINT}")
+
+
+def _forget_project_modules():
+    """Drop modules imported from earlier clones, so a repo whose package name
+    (say `utils`) matches another project's gets its own code, not a cached copy.
+    Sessions already loaded keep working: they hold direct function references."""
+    roots = tuple(os.path.normcase(os.path.abspath(p)) + os.sep for p in (CLONE_ROOT, DEMO_DIR))
+    for name, mod in list(sys.modules.items()):
+        f = getattr(mod, "__file__", None)
+        if f and os.path.normcase(os.path.abspath(f)).startswith(roots):
+            del sys.modules[name]
+
+
+def _load_pipeline_module(repo_dir: str):
+    entry = os.path.join(repo_dir, PIPELINE_FILE)
+    _forget_project_modules()
     mod_name = f"autocnic_pipeline_{uuid.uuid4().hex}"
     spec = importlib.util.spec_from_file_location(mod_name, entry)
     module = importlib.util.module_from_spec(spec)
@@ -117,6 +248,14 @@ def _load_pipeline_module(repo_dir: str):
     sys.path.insert(0, repo_dir)
     try:
         spec.loader.exec_module(module)
+    except ModuleNotFoundError as e:
+        sys.modules.pop(mod_name, None)
+        raise RepoLoadError(
+            f"autocnic_pipeline.py imports {e.name!r}, which is not available here. The app can "
+            f"only use the Python standard library, modules inside your repo, and "
+            f"`autocnic.pipeline`. If {e.name!r} is your own package, make sure its folder "
+            f"(with an __init__.py) sits next to autocnic_pipeline.py."
+        )
     except Exception as e:
         sys.modules.pop(mod_name, None)
         raise RepoLoadError(f"error importing autocnic_pipeline.py: {e!r}")
@@ -126,15 +265,28 @@ def _load_pipeline_module(repo_dir: str):
     pipeline = getattr(module, "PIPELINE", None)
     samplers = getattr(module, "SAMPLERS", None)
     if not isinstance(pipeline, Pipeline):
-        raise RepoLoadError("autocnic_pipeline.py must define PIPELINE = <autocnic.pipeline.Pipeline instance>")
+        raise RepoLoadError(
+            "autocnic_pipeline.py must define PIPELINE = Pipeline(...) "
+            "(from autocnic.pipeline import Pipeline). " + GUIDE_HINT)
+    if not pipeline.inputs:
+        raise RepoLoadError("PIPELINE has no inputs -- declare at least one with PIPELINE.input(\"name\").")
+    if not any(not s.is_input for s in pipeline.steps.values()):
+        raise RepoLoadError("PIPELINE has no steps -- register functions with PIPELINE.step(\"name\")(fn).")
     if not isinstance(samplers, dict):
-        raise RepoLoadError("autocnic_pipeline.py must define SAMPLERS = {input_name: callable}")
+        raise RepoLoadError("autocnic_pipeline.py must define SAMPLERS = {input_name: lambda: <random value>}. " + GUIDE_HINT)
     missing = [n for n in pipeline.inputs if n not in samplers]
     if missing:
         raise RepoLoadError(f"SAMPLERS is missing entries for input(s): {missing}")
-    initial_inputs = getattr(module, "INITIAL_INPUTS", None)
-    if initial_inputs is None:
-        initial_inputs = {n: samplers[n]() for n in pipeline.inputs}
+    not_callable = [n for n in pipeline.inputs if not callable(samplers[n])]
+    if not_callable:
+        raise RepoLoadError(f"SAMPLERS entries must be functions (e.g. lambda: random.randint(1, 9)); not callable: {not_callable}")
+    initial_inputs = dict(getattr(module, "INITIAL_INPUTS", None) or {})
+    unknown = [n for n in initial_inputs if n not in pipeline.inputs]
+    if unknown:
+        raise RepoLoadError(f"INITIAL_INPUTS has keys that are not declared inputs: {unknown}")
+    for n in pipeline.inputs:
+        if n not in initial_inputs:
+            initial_inputs[n] = samplers[n]()
     return pipeline, samplers, initial_inputs
 
 
@@ -142,16 +294,29 @@ def analyze_repo(repo_url: str, n_trials_per_edge: int = 300, seed: int = 0) -> 
     """Clones repo_url, loads its pipeline, runs discovery (perturbation
     experiments + predicate mining), and returns a live Session with the
     synthesized CNIC graph and an initial engine State ready for updates."""
+    source = resolve_source(repo_url)
     session_id = uuid.uuid4().hex[:12]
-    repo_dir = _clone_repo(repo_url, session_id)
-    pipeline, samplers, initial_inputs = _load_pipeline_module(repo_dir)
-    pipeline.finalize()
-
-    evidence = collect_edge_evidence(pipeline, samplers, n_trials_per_edge=n_trials_per_edge, seed=seed)
-    synthesized = synthesize_edges(evidence, confidence_bar=0.90)
-    graph = build_cnic_graph(pipeline, synthesized)
-
-    baseline_values = pipeline.run_once(initial_inputs)
+    clone_dir = _clone_repo(source, session_id)
+    try:
+        repo_dir = _find_pipeline_dir(clone_dir, source.subdir)
+        pipeline, samplers, initial_inputs = _load_pipeline_module(repo_dir)
+        try:
+            pipeline.finalize()
+            pipeline.topological_order()
+            baseline_values = pipeline.run_once(initial_inputs)
+        except Exception as e:
+            raise RepoLoadError(f"running the pipeline once with INITIAL_INPUTS failed: {e!r}")
+        try:
+            evidence = collect_edge_evidence(pipeline, samplers, n_trials_per_edge=n_trials_per_edge, seed=seed)
+        except Exception as e:
+            raise RepoLoadError(
+                f"a step raised during perturbation experiments: {e!r}. Steps must accept any "
+                f"value the SAMPLERS can produce.")
+        synthesized = synthesize_edges(evidence, confidence_bar=0.90)
+        graph = build_cnic_graph(pipeline, synthesized)
+    except BaseException:
+        _rmtree(clone_dir)
+        raise
     state = State(version=0, values=dict(baseline_values))
 
     synthesized_desc = [
@@ -168,7 +333,17 @@ def analyze_repo(repo_url: str, n_trials_per_edge: int = 300, seed: int = 0) -> 
     )
     SESSIONS[session_id] = session
     _write_meta(session)
+    _evict_old_sessions()
     return session
+
+
+def _evict_old_sessions():
+    """Keep memory bounded: past the limit, the oldest live sessions drop to
+    read-only (their records stay on disk) and their clones are deleted."""
+    while len(SESSIONS) > settings.MAX_LIVE_SESSIONS:
+        oldest = min(SESSIONS.values(), key=lambda s: s.created_at)
+        del SESSIONS[oldest.id]
+        _rmtree(os.path.join(CLONE_ROOT, oldest.id))
 
 
 def graph_to_json(graph: ConditionalDependencyGraph) -> dict:

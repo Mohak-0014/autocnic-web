@@ -25,11 +25,46 @@ python main.py
 
 Then open **http://localhost:8000** in a browser.
 
+## Deployment
+
+The repo root has a `Dockerfile` and a Render blueprint (`render.yaml`).
+
+```bash
+docker build -t autocnic-web .
+docker run -p 8000:8000 -v autocnic-data:/data -e AUTOCNIC_BASIC_AUTH=me:secret autocnic-web
+```
+
+The container runs a single process (live sessions are kept in memory), as
+an unprivileged user, and stores clones and certificates in `/data`. Mount a
+volume there so certificates survive redeploys. `GET /healthz` is the health
+check.
+
+**Security:** analyzing a repo imports and runs its Python code on the server.
+On a public deployment, set `AUTOCNIC_BASIC_AUTH`. The Docker image already
+turns off local folder paths (`AUTOCNIC_ALLOW_LOCAL_PATHS=0`), so visitors can't
+read the server's filesystem.
+
+### Configuration
+
+All settings are environment variables (see `backend/settings.py`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PORT` / `HOST` | `8000` / `0.0.0.0` | Bind address |
+| `AUTOCNIC_DATA_DIR` | `backend/` (`/data` in Docker) | Where `_clones/` and `cert_store/` live |
+| `AUTOCNIC_BASIC_AUTH` | unset | `user:password` to require a login on every page |
+| `AUTOCNIC_ALLOW_LOCAL_PATHS` | `1` (`0` in Docker) | Accept local folders and `file://` URLs |
+| `AUTOCNIC_MAX_LIVE_SESSIONS` | `20` | Live sessions kept in memory; older ones become read-only |
+| `AUTOCNIC_MAX_TRIALS` | `1000` | Cap on perturbation trials per edge |
+| `AUTOCNIC_CLONE_TIMEOUT` | `60` | Seconds before `git clone` is abandoned |
+| `AUTOCNIC_CORS_ORIGINS` | unset | Comma-separated origins, only needed for a separately hosted frontend |
+
 ## Pages
 
 | Page | URL | What it does |
 |---|---|---|
-| Analyze | `/` | Paste a GitHub URL, a `file://` URL or a **local folder path**, or click a bundled project. Lists previous sessions. |
+| Analyze | `/` | Paste a GitHub URL or `owner/repo` (or a local folder path when running locally), or click a bundled example. Lists previous sessions. |
+| Guide | `/guide` | How to structure a repo for the app, with copyable code and a starter template download. |
 | Inputs | `/inputs` | Edit several inputs at once and apply them as a scenario; each change is its own certified update. |
 | Live tracker | `/track` | Graph coloured by what was recomputed vs. certified-skipped, a replayable timeline, quick single-input changes, values, totals. |
 | Certificates | `/certificates` | Gallery of every certificate with filters (update, class, node, verdict). |
@@ -40,14 +75,28 @@ Sessions from before a server restart open **read-only** (graph, timeline, certi
 ## Getting a repo to analyze
 
 The repo must follow the **AutoCNIC pipeline convention**: an
-`autocnic_pipeline.py` at the root exposing `PIPELINE` and `SAMPLERS`. Three
-projects are bundled in `demo_repos/` and can be analyzed straight from the
-Analyze page, with no GitHub push needed. `autocnic-demo-shopfront` is a
-multi-module project (package + tests) and the best starting point.
+`autocnic_pipeline.py` exposing `PIPELINE` and `SAMPLERS` (and optionally
+`INITIAL_INPUTS`). The `/guide` page walks through it, and `template/` is a
+starter project (also downloadable from `/api/template.zip`).
+
+The Analyze box accepts:
+
+- `owner/repo` or `https://github.com/owner/repo`
+- `https://github.com/owner/repo/tree/<branch>/<folder>`, for a branch or a subfolder
+- any https/ssh git clone URL
+- a local folder path or `file://` URL (only when `AUTOCNIC_ALLOW_LOCAL_PATHS=1`)
+
+If `autocnic_pipeline.py` isn't at the repo root, the app looks for it up to
+3 folders deep. Repos must be public, and pipelines can only import the
+standard library and modules in the repo itself.
+
+Four projects are bundled in `demo_repos/` and can be analyzed straight from
+the Analyze page. `autocnic-demo-shopfront` is a multi-module project
+(package + tests) and the best starting point.
 
 ## What happens on Analyze
 
-1. `git clone --depth 1 <url>` (or a copy, for a local folder) into `backend/_clones/<session_id>/`.
+1. `git clone --depth 1 <url>` (or a copy, for a local folder) into `<data dir>/_clones/<session_id>/`.
 2. Import `autocnic_pipeline.py`, run `pipeline.finalize()` (this is where
    beniget-based static inference resolves any `infer_reads=True` steps).
 3. Run controlled perturbation experiments (`autocnic/synthesize.py`) —
@@ -81,15 +130,15 @@ The browser sends the new value to `/api/update`. The backend runs the real
 backend/
   main.py             FastAPI app: /api/analyze, /api/update, /api/session, /api/certificates
   runner.py            clone + import + discovery + live update logic
+  settings.py          environment-variable configuration
   autocnic/             vendored AutoCNIC library (pipeline, static_analysis, synthesize, engine, ...)
   cert_store/           persisted certificates (<session_id>.jsonl) + session metadata
   requirements.txt
 frontend/
-  index.html inputs.html track.html certificates.html certificate.html   the five pages
+  index.html guide.html inputs.html track.html certificates.html certificate.html
   app.css app.js        shared styles and helpers
-demo_repos/
-  autocnic-demo-pricing/           push this to your own GitHub to use it
-  autocnic-demo-global-reads/      push this to your own GitHub to use it
+template/               starter project served as /api/template.zip
+demo_repos/             bundled example projects (analyzable via demo:<name>)
 ```
 
 ## Honest limitations (for the faculty demo)
@@ -104,5 +153,6 @@ demo_repos/
   objects) are in-memory and reset on backend restart; only the certificate
   JSONL files and session metadata on disk survive a restart. Re-running
   `/api/analyze` on the same repo rebuilds a session from scratch quickly.
-- Single-process, no auth, no HTTPS — this is a local demo tool, not a
-  deployable multi-tenant service.
+- Single process, with optional shared-password auth. Run it behind your
+  host's HTTPS. Submitted repos run unsandboxed inside the container, so only
+  give access to people you trust.

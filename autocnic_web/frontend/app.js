@@ -91,6 +91,7 @@ async function boot(active, opts) {
         `<a href="${needs ? pageLink(href) : href}" class="${key === active ? 'active' : ''} ${needs && !session ? 'disabled' : ''}"><span class="n">${i + 1}</span><span class="t">${label}</span></a>`).join('')}
     </div>
     <div class="nav-spacer"></div>
+    <a class="nav-guide ${active === 'guide' ? 'active' : ''}" href="/guide">Guide</a>
     ${session ? `<div class="session-chip" title="${esc(session.repo_url)}"><span class="led ${session.live ? '' : 'off'}"></span><b>${esc(repoName(session.repo_url))}</b><span class="mono">${esc(session.session_id)}</span></div>` : ''}`;
 
   if (!document.getElementById('footer')) {
@@ -98,7 +99,7 @@ async function boot(active, opts) {
     f.id = 'footer'; f.className = 'footer';
     f.innerHTML = `<div class="inner"><a class="brand" href="/"><span class="logo">${LOGO}</span>AutoCNIC</a>
       <span>Conditional dependency discovery with verifiable update certificates.</span><div class="spacer"></div>
-      <a href="/">Analyze</a><a href="${session ? pageLink('/track') : '/'}">Live tracker</a><a href="${session ? pageLink('/certificates') : '/'}">Certificates</a></div>`;
+      <a href="/">Analyze</a><a href="/guide">Guide</a><a href="${session ? pageLink('/track') : '/'}">Live tracker</a><a href="${session ? pageLink('/certificates') : '/'}">Certificates</a></div>`;
     document.body.appendChild(f);
   }
 
