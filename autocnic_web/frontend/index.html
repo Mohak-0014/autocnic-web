@@ -145,12 +145,17 @@
   btn.onclick = () => analyze();
 
   try {
-    const {demos, allow_local_paths} = await api('/api/demos');
+    const {demos, allow_local_paths, repos_enabled} = await api('/api/demos');
     if (demos.length) {
       const row = document.getElementById('demos');
       row.innerHTML = '<span class="muted">Try a bundled example:</span>' + demos.map(d =>
         `<button class="secondary small" data-src="${esc(d.source)}" title="${esc(d.blurb)}">${esc(d.name.replace('autocnic-demo-', ''))}</button>`).join('');
       row.querySelectorAll('button').forEach(b => b.onclick = () => analyze(b.dataset.src));
+    }
+    if (repos_enabled === false) {
+      urlInput.placeholder = 'demo:autocnic-demo-shopfront  (this server runs the bundled examples only)';
+      document.getElementById('local-note').innerHTML =
+        '<br>This server runs the <b>bundled examples only</b>; the operator must set a password to enable other repositories.';
     }
     if (allow_local_paths) {
       document.getElementById('local-note').innerHTML = ' &middot; Local folder paths also work on this server.';
