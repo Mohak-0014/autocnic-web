@@ -3,17 +3,17 @@ services:
   - type: web
     name: autocnic-web
     runtime: docker
-    plan: starter            # persistent disks need a paid plan; drop `disk` to use free
+    # Free plan: sleeps after ~15 min idle (first visit then takes ~1 min) and has
+    # no persistent disk, so sessions and certificates reset on every restart or
+    # redeploy. To keep them, switch to `plan: starter` and add:
+    #   disk: {name: autocnic-data, mountPath: /data, sizeGB: 1}
+    plan: free
     healthCheckPath: /healthz
     envVars:
       - key: AUTOCNIC_BASIC_AUTH
         sync: false          # "user:password"; without it, only the bundled demos can be analyzed
-      # Sized for the starter plan's 512 MB: one worker process per live session.
+      # Sized for 512 MB of RAM: one worker process per live session.
       - key: AUTOCNIC_MAX_LIVE_SESSIONS
         value: "6"
       - key: AUTOCNIC_WORKER_MEMORY_MB
         value: "400"
-    disk:
-      name: autocnic-data
-      mountPath: /data
-      sizeGB: 1

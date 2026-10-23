@@ -25,7 +25,11 @@ docker run -p 8000:8000 -v autocnic-data:/data -e AUTOCNIC_BASIC_AUTH=me:secret 
 ```
 
 **Render**: New → Blueprint → select this repo (`render.yaml`). Set
-`AUTOCNIC_BASIC_AUTH` (`user:password`) in the dashboard.
+`AUTOCNIC_BASIC_AUTH` (`user:password`) in the dashboard. The blueprint uses
+Render's **free plan**: the service sleeps after ~15 minutes idle (the next visit
+takes about a minute) and stored sessions/certificates reset on each restart. Open
+the site shortly before a demo to wake it. For persistence, see the comment in
+`render.yaml`.
 
 Analyzing a repo **runs that repo's Python code on the server**, so:
 
