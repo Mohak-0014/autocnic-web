@@ -7,7 +7,12 @@ services:
     healthCheckPath: /healthz
     envVars:
       - key: AUTOCNIC_BASIC_AUTH
-        sync: false          # set "user:password" in the dashboard to require a login
+        sync: false          # "user:password"; without it, only the bundled demos can be analyzed
+      # Sized for the starter plan's 512 MB: one worker process per live session.
+      - key: AUTOCNIC_MAX_LIVE_SESSIONS
+        value: "6"
+      - key: AUTOCNIC_WORKER_MEMORY_MB
+        value: "400"
     disk:
       name: autocnic-data
       mountPath: /data

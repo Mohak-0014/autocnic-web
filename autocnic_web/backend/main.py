@@ -22,9 +22,12 @@ Then open http://localhost:8000 . Configuration: see settings.py.
 from __future__ import annotations
 
 import base64
+import contextlib
+import ctypes
 import io
 import os
 import secrets
+import sys
 import traceback
 import zipfile
 
@@ -37,7 +40,24 @@ from pydantic import BaseModel, Field
 import runner
 import settings
 
-app = FastAPI(title="AutoCNIC Web Demo")
+
+@contextlib.asynccontextmanager
+async def lifespan(_app):
+    if sys.platform.startswith("linux"):
+        # Project workers run as this same user. Non-dumpable means they can't
+        # read this process's memory or /proc/<pid>/environ (the password).
+        try:
+            ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE = 4
+        except (OSError, AttributeError):
+            pass
+    if not settings.REPOS_ENABLED:
+        print("AutoCNIC: no AUTOCNIC_BASIC_AUTH set -- only the bundled demo projects can be "
+              "analyzed. Set it to let users submit their own repositories.", flush=True)
+    yield
+    runner.shutdown()
+
+
+app = FastAPI(title="AutoCNIC Web Demo", lifespan=lifespan)
 if settings.CORS_ORIGINS:
     app.add_middleware(
         CORSMiddleware, allow_origins=settings.CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"],
@@ -84,8 +104,7 @@ def analyze(req: AnalyzeRequest):
         raise HTTPException(400, "repo_url is required")
     n_trials = min(req.n_trials_per_edge, settings.MAX_TRIALS)
     try:
-        with runner.LOCK:
-            session = runner.analyze_repo(repo_url, n_trials_per_edge=n_trials, seed=req.seed)
+        session = runner.analyze_repo(repo_url, n_trials_per_edge=n_trials, seed=req.seed)
     except runner.RepoLoadError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -95,11 +114,9 @@ def analyze(req: AnalyzeRequest):
     return {
         "session_id": session.id,
         "repo_url": session.repo_url,
-        "graph": runner.graph_to_json(session.graph),
-        "state": runner.state_to_json(session.state),
-        "inputs": {
-            n: {"current_value": session.state.values.get(n)} for n in session.pipeline.inputs
-        },
+        "graph": session.graph,
+        "state": session.state,
+        "inputs": {n: {"current_value": session.state["values"].get(n)} for n in session.input_nodes},
         "synthesized_edges": session.synthesized_desc,
     }
 
@@ -110,8 +127,7 @@ def update(req: UpdateRequest):
     if session is None:
         raise HTTPException(404, "unknown session_id (re-analyze the repo)")
     try:
-        with runner.LOCK:
-            result = runner.apply_update(session, req.input_node, req.value)
+        result = runner.apply_update(session, req.input_node, req.value)
     except runner.RepoLoadError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -153,7 +169,8 @@ def list_demos():
             path = os.path.join(DEMO_DIR, name)
             if os.path.isfile(os.path.join(path, "autocnic_pipeline.py")):
                 demos.append({"name": name, "source": f"demo:{name}", "blurb": DEMO_BLURBS.get(name, "")})
-    return {"demos": demos, "allow_local_paths": settings.ALLOW_LOCAL_PATHS}
+    return {"demos": demos, "allow_local_paths": settings.ALLOW_LOCAL_PATHS,
+            "repos_enabled": settings.REPOS_ENABLED}
 
 
 @app.get("/api/template.zip")
@@ -187,9 +204,9 @@ def get_session(session_id: str):
             "initial_values": meta.get("initial_values", {}),
             "repo_url": session.repo_url,
             "created_at": session.created_at,
-            "graph": runner.graph_to_json(session.graph),
-            "state": runner.state_to_json(session.state),
-            "inputs": {n: {"current_value": session.state.values.get(n)} for n in session.pipeline.inputs},
+            "graph": session.graph,
+            "state": session.state,
+            "inputs": {n: {"current_value": session.state["values"].get(n)} for n in session.input_nodes},
             "synthesized_edges": session.synthesized_desc,
             "cumulative": cumulative,
         }
